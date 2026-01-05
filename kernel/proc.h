@@ -105,3 +105,10 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+  // Scheduler-specific fields
+  uint64 creation_time;        // Creation time (for FCFS and CFS)
+  int nice;                    // Nice value for CFS (default 0)
+  uint64 vruntime;             // Virtual runtime for CFS
+  int weight;                  // Weight for CFS (calculated from nice)
+  int time_slice;              // Time slice for CFS
+};
