@@ -14,6 +14,9 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+
+// Global counter for total bytes read
+uint64 total_bytes_read = 0;
 struct run {
   struct run *next;
 };
