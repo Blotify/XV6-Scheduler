@@ -105,3 +105,31 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+uint64
+sys_getreadcount(void)
+{
+  extern uint64 total_bytes_read;
+  return total_bytes_read;
+}
+
+uint64
+sys_sleep(void)
+{
+  int n;
+  uint ticks0;
+
+  argint(0, &n);
+  if(n < 0)
+    n = 0;
+  acquire(&tickslock);
+  ticks0 = ticks;
+  while(ticks - ticks0 < n){
+    if(killed(myproc())){
+      release(&tickslock);
+      return -1;
+    }
+    sleep(&ticks, &tickslock);
+  }
+  release(&tickslock);
+  return 0;
+}
