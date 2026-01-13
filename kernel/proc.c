@@ -428,21 +428,55 @@ scheduler(void)
 
   c->proc = 0;
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+    // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-    intr_off();
 
+    #ifdef FCFS
+    // FCFS SCHEDULER
+    struct proc *earliest_proc = 0;
+    uint64 earliest_time = 0;
+
+    // Find the runnable process with the earliest creation time
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        if(earliest_proc == 0 || p->creation_time < earliest_time) {
+          earliest_proc = p;
+          earliest_time = p->creation_time;
+        }
+      }
+      release(&p->lock);
+    }
+
+    // Run the earliest process if found
+    if(earliest_proc) {
+      acquire(&earliest_proc->lock);
+      if(earliest_proc->state == RUNNABLE) {
+        // Switch to chosen process
+        earliest_proc->state = RUNNING;
+        c->proc = earliest_proc;
+        swtch(&c->context, &earliest_proc->context);
+
+        // Process is done running for now
+        c->proc = 0;
+      }
+      release(&earliest_proc->lock);
+    } else {
+      // No runnable processes; wait for an interrupt
+      asm volatile("wfi");
+    }
+
+    #else
+    // ROUND ROBIN SCHEDULER
     int found = 0;
+    
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
+        
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
@@ -458,6 +492,7 @@ scheduler(void)
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
     }
+    #endif
   }
 }
 
