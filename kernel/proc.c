@@ -6,6 +6,15 @@
 #include "proc.h"
 #include "defs.h"
 
+// Pre-calculated weights for nice values from -20 to 19.
+// weight = 1024 / (1.25 ^ nice)
+const int nice_to_weight[40] = {
+  88761, 71755, 56364, 46273, 36421, 29156, 23257, 18705, 14949,
+  11916, 9548, 7620, 6100, 4875, 3904, 3121, 2501, 1991, 1586,
+  1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110,
+  87, 70, 56, 45, 36, 29, 23, 18, 15
+};
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
