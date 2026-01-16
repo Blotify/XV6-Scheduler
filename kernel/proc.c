@@ -120,6 +120,23 @@ static struct proc*
 allocproc(void)
 {
   struct proc *p;
+  uint64 min_vruntime = 0;
+
+  // Find the minimum vruntime among all runnable processes for fairness.
+  // A new process should start with this vruntime.
+  int found_runnable = 0;
+  for(struct proc *p_search = proc; p_search < &proc[NPROC]; p_search++) {
+    if(p_search->state == RUNNABLE) {
+      if(found_runnable == 0 || p_search->vruntime < min_vruntime) {
+        min_vruntime = p_search->vruntime;
+        found_runnable = 1;
+      }
+    }
+  }
+  // If no runnable process was found, start at 0.
+  if (min_vruntime == -1) {
+    min_vruntime = 0;
+  }
 
   for(p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
