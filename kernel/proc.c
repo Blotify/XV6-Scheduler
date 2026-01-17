@@ -301,6 +301,25 @@ kfork(void)
   }
   np->sz = p->sz;
 
+  // Inherit parent's nice value and vruntime
+  np->nice = p->nice;
+  np->weight = p->weight;
+  // np->vruntime = p->vruntime;
+  uint64 min_vruntime = -1;
+  for(struct proc *p_search = proc; p_search < &proc[NPROC]; p_search++) {
+    if(p_search->state == RUNNABLE) {
+      if(min_vruntime == -1 || p_search->vruntime < min_vruntime) {
+        min_vruntime = p_search->vruntime;
+      }
+    }
+  }
+  if(min_vruntime == -1) {
+    // If no other runnable procs, inherit parent's vruntime as a fallback.
+    np->vruntime = p->vruntime;
+  } else {
+    np->vruntime = min_vruntime;
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
