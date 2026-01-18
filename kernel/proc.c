@@ -476,7 +476,65 @@ scheduler(void)
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
-    #ifdef FCFS
+    #ifdef CFS
+    // COMPLETELY FAIR SCHEDULER (CFS)
+    int num_runnable = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        num_runnable++;
+      }
+      release(&p->lock);
+    }
+
+    int slice = TARGET_LATENCY;
+    if (num_runnable > 0) {
+      slice = TARGET_LATENCY / num_runnable;
+    }
+    if (slice < MIN_TIME_SLICE) {
+      slice = MIN_TIME_SLICE;
+    }
+
+    struct proc *best_proc = 0;
+    uint64 min_vruntime = (uint64)-1;  // Start with max value
+
+    // Find the runnable process with the smallest vruntime.
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        if(best_proc == 0 || p->vruntime < min_vruntime) {
+          if(best_proc) {
+            release(&best_proc->lock);  // Release previous best
+          }
+          best_proc = p;
+          min_vruntime = p->vruntime;
+          // Keep lock held on best_proc
+        } else {
+          release(&p->lock);
+        }
+      } else {
+        release(&p->lock);
+      }
+    }
+
+    if(best_proc) {
+      // best_proc lock is already held
+      if(best_proc->state == RUNNABLE) {
+        best_proc->time_slice = slice; // Assign calculated time slice
+        best_proc->state = RUNNING;
+        c->proc = best_proc;
+        swtch(&c->context, &best_proc->context);
+        c->proc = 0;
+        best_proc->vruntime += (best_proc->time_slice * 1024) / best_proc->weight;
+      }
+      release(&best_proc->lock);
+    } else {
+      // No runnable processes; wait for an interrupt.
+      asm volatile("wfi");
+    }
+
+
+    #elif defined(FCFS)
     // FCFS SCHEDULER
     struct proc *earliest_proc = 0;
     uint64 earliest_time = 0;
