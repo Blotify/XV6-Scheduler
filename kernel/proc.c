@@ -821,7 +821,9 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    #ifdef FCFS
+    #if defined(CFS)
+    printf("%d %s %s nice=%d vruntime=%ld", p->pid, state, p->name, p->nice, p->vruntime);
+    #elif defined(FCFS)
     printf("%d %s %s (creation time: %ld)", p->pid, state, p->name, p->creation_time);
     #else
     printf("%d %s %s", p->pid, state, p->name);
