@@ -1,3 +1,10 @@
+# For testing file system and user programs
+EXTRA=echo cat sh init
+
+# Scheduler selection: RR (Round Robin), FCFS (First Come First Serve), or CFS (Completely Fair Scheduler)
+SCHEDULER ?= RR
+
+.PHONY: qemu qemu-nox qemu-gdb qemu-nox-gdb
 K=kernel
 U=user
 
@@ -70,6 +77,7 @@ CFLAGS += -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin
 CFLAGS += -fno-builtin-free
 CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
+CFLAGS += -D$(SCHEDULER)
 CFLAGS += -I.
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 
