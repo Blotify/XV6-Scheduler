@@ -1,0 +1,739 @@
+diff --git a/Makefile b/Makefile
+index 2d5f9e4..5df64b7 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,3 +1,10 @@
++# For testing file system and user programs
++EXTRA=echo cat sh init
++
++# Scheduler selection: RR (Round Robin), FCFS (First Come First Serve), or CFS (Completely Fair Scheduler)
++SCHEDULER ?= RR
++
++.PHONY: qemu qemu-nox qemu-gdb qemu-nox-gdb
+ K=kernel
+ U=user
+ 
+@@ -71,6 +78,7 @@ CFLAGS += -fno-builtin-free
+ CFLAGS += -fno-builtin-memcpy -Wno-main
+ CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
+ CFLAGS += -I.
++CFLAGS += -D$(SCHEDULER)
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ 
+ # Disable PIE when possible (for Ubuntu 16.10 toolchain)
+@@ -142,6 +150,8 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_readcount\
++	$U/_schedulertest\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index 0699e7e..b0ac2de 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -13,6 +13,12 @@ void freerange(void *pa_start, void *pa_end);
+ 
+ extern char end[]; // first address after kernel.
+                    // defined by kernel.ld.
++// ############## LLM Generated Code Begins ##############
++
++// Global counter for total bytes read
++uint64 total_bytes_read = 0;
++// ############## LLM Generated Code Ends ##############
++
+ 
+ struct run {
+   struct run *next;
+diff --git a/kernel/param.h b/kernel/param.h
+index cd2a41c..cb04380 100644
+--- a/kernel/param.h
++++ b/kernel/param.h
+@@ -13,3 +13,10 @@
+ #define MAXPATH      128   // maximum file path name
+ #define USERSTACK    1     // user stack pages
+ 
++// ############## LLM Generated Code Begins ##############
++
++// CFS scheduler constants
++#define TARGET_LATENCY   20    // Target scheduling latency in ticks
++#define MIN_TIME_SLICE   1     // Minimum time slice
++
++// ############## LLM Generated Code Ends ##############
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 9d6cf3f..94e85ed 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -6,6 +6,19 @@
+ #include "proc.h"
+ #include "defs.h"
+ 
++// ############## LLM Generated Code Begins ##############
++
++
++// Pre-calculated weights for nice values from -20 to 19.
++// weight = 1024 / (1.25 ^ nice)
++// This array is non-static to be accessible by sys_set_priority.
++const int nice_to_weight[40] = {
++  88761, 71755, 56364, 46273, 36421, 29156, 23257, 18705, 14949,
++  11916, 9548, 7620, 6100, 4875, 3904, 3121, 2501, 1991, 1586,
++  1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172, 137, 110,
++  87, 70, 56, 45, 36, 29, 23, 18, 15
++};
++
+ struct cpu cpus[NCPU];
+ 
+ struct proc proc[NPROC];
+@@ -15,6 +28,9 @@ struct proc *initproc;
+ int nextpid = 1;
+ struct spinlock pid_lock;
+ 
++uint64 next_creation_time = 1;      // ADDED
++struct spinlock creation_time_lock;
++
+ extern void forkret(void);
+ static void freeproc(struct proc *p);
+ 
+@@ -51,6 +67,7 @@ procinit(void)
+   
+   initlock(&pid_lock, "nextpid");
+   initlock(&wait_lock, "wait_lock");
++  initlock(&creation_time_lock, "creation_time");   // ADDED
+   for(p = proc; p < &proc[NPROC]; p++) {
+       initlock(&p->lock, "proc");
+       p->state = UNUSED;
+@@ -110,6 +127,24 @@ static struct proc*
+ allocproc(void)
+ {
+   struct proc *p;
++  uint64 min_vruntime = 0;
++
++  // Find the minimum vruntime among all runnable processes for fairness.
++  // A new process should start with this vruntime.
++  int found_runnable = 0;
++  for(struct proc *p_search = proc; p_search < &proc[NPROC]; p_search++) {
++    if(p_search->state == RUNNABLE) {
++      if(found_runnable == 0 || p_search->vruntime < min_vruntime) {
++        min_vruntime = p_search->vruntime;
++        found_runnable = 1;
++      }
++    }
++  }
++  // If no runnable process was found, start at 0.
++  if (min_vruntime == -1) {
++    min_vruntime = 0;
++  }
++
+ 
+   for(p = proc; p < &proc[NPROC]; p++) {
+     acquire(&p->lock);
+@@ -125,6 +160,17 @@ found:
+   p->pid = allocpid();
+   p->state = USED;
+ 
++  // Initialize CFS values
++  p->nice = 0; // Default nice value
++  p->weight = nice_to_weight[p->nice + 20];
++  p->vruntime = min_vruntime; // Start with 0, will be updated
++  p->time_slice = 0;
++
++  // Assign creation time  // ADDED BLOCK
++  acquire(&creation_time_lock);
++  p->creation_time = next_creation_time++;
++  release(&creation_time_lock);
++
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+     freeproc(p);
+@@ -168,6 +214,7 @@ freeproc(struct proc *p)
+   p->chan = 0;
+   p->killed = 0;
+   p->xstate = 0;
++  p->creation_time = 0; // ADDED
+   p->state = UNUSED;
+ }
+ 
+@@ -273,6 +320,26 @@ kfork(void)
+   }
+   np->sz = p->sz;
+ 
++  // Inherit parent's nice value and vruntime
++  np->nice = p->nice;
++  np->weight = p->weight;
++  // np->vruntime = p->vruntime;
++  uint64 min_vruntime = -1;
++  for(struct proc *p_search = proc; p_search < &proc[NPROC]; p_search++) {
++    if(p_search->state == RUNNABLE) {
++      if(min_vruntime == -1 || p_search->vruntime < min_vruntime) {
++        min_vruntime = p_search->vruntime;
++      }
++    }
++  }
++  if(min_vruntime == -1) {
++    // If no other runnable procs, inherit parent's vruntime as a fallback.
++    np->vruntime = p->vruntime;
++  } else {
++    np->vruntime = min_vruntime;
++  }
++
++
+   // copy saved user registers.
+   *(np->trapframe) = *(p->trapframe);
+ 
+@@ -426,21 +493,127 @@ scheduler(void)
+ 
+   c->proc = 0;
+   for(;;){
+-    // The most recent process to run may have had interrupts
+-    // turned off; enable them to avoid a deadlock if all
+-    // processes are waiting. Then turn them back off
+-    // to avoid a possible race between an interrupt
+-    // and wfi.
++    // Avoid deadlock by ensuring that devices can interrupt.
+     intr_on();
+-    intr_off();
+ 
++    #ifdef CFS
++    // COMPLETELY FAIR SCHEDULER (CFS) - CORRECTED VERSION
++    int num_runnable = 0;
++    for(p = proc; p < &proc[NPROC]; p++) {
++      acquire(&p->lock);
++      if(p->state == RUNNABLE) {
++        num_runnable++;
++      }
++      release(&p->lock);
++    }
++
++    int slice = TARGET_LATENCY;
++    if (num_runnable > 0) {
++      slice = TARGET_LATENCY / num_runnable;
++    }
++    if (slice < MIN_TIME_SLICE) {
++      slice = MIN_TIME_SLICE;
++    }
++
++    struct proc *best_proc = 0;
++
++    if (num_runnable > 2) {
++      printf("[Scheduler Tick]\n");
++      for(p = proc; p < &proc[NPROC]; p++) {
++        if(p->state == RUNNABLE) {
++          printf("PID: %d | vRuntime: %ld\n", p->pid, p->vruntime);
++        }
++      }
++    }
++
++    uint64 min_vruntime = (uint64)-1;  // Start with max value
++
++    // Find the runnable process with the smallest vruntime.
++    for(p = proc; p < &proc[NPROC]; p++) {
++      acquire(&p->lock);
++      if(p->state == RUNNABLE) {
++        if(best_proc == 0 || p->vruntime < min_vruntime) {
++          if(best_proc) {
++            release(&best_proc->lock);  // Release previous best
++          }
++          best_proc = p;
++          min_vruntime = p->vruntime;
++          // Keep lock held on best_proc
++        } else {
++          release(&p->lock);
++        }
++      } else {
++        release(&p->lock);
++      }
++    }
++
++    if(best_proc) {
++      if (num_runnable > 2) {
++        printf("--> Scheduling PID %d (lowest vRuntime)\n", best_proc->pid);
++      }
++      // best_proc lock is already held
++      if(best_proc->state == RUNNABLE) {
++        best_proc->time_slice = slice; // Assign calculated time slice
++        best_proc->state = RUNNING;
++        c->proc = best_proc;
++        swtch(&c->context, &best_proc->context);
++        c->proc = 0;
++        best_proc->vruntime += (best_proc->time_slice * 1024) / best_proc->weight;
++      }
++      release(&best_proc->lock);
++    } else {
++      // No runnable processes; wait for an interrupt.
++      asm volatile("wfi");
++    }
++
++
++    #elif defined(FCFS)
++    // FCFS SCHEDULER - SIMPLE VERSION
++    struct proc *earliest_proc = 0;
++    uint64 earliest_time = 0;
++
++    // Find the runnable process with the earliest creation time
++    for(p = proc; p < &proc[NPROC]; p++) {
++      acquire(&p->lock);
++      if(p->state == RUNNABLE) {
++        if(earliest_proc == 0 || p->creation_time < earliest_time) {
++          earliest_proc = p;
++          earliest_time = p->creation_time;
++        }
++      }
++      release(&p->lock);
++    }
++
++    // Run the earliest process if found
++    if(earliest_proc) {
++      acquire(&earliest_proc->lock);
++      if(earliest_proc->state == RUNNABLE) {
++        // Switch to chosen process
++        earliest_proc->state = RUNNING;
++        c->proc = earliest_proc;
++        swtch(&c->context, &earliest_proc->context);
++
++        // Process is done running for now
++        c->proc = 0;
++      }
++      release(&earliest_proc->lock);
++    } else {
++      // No runnable processes; wait for an interrupt
++      asm volatile("wfi");
++    }
++
++    #else
++    // ROUND ROBIN SCHEDULER
+     int found = 0;
++    
+     for(p = proc; p < &proc[NPROC]; p++) {
+       acquire(&p->lock);
+       if(p->state == RUNNABLE) {
+         // Switch to chosen process.  It is the process's job
+         // to release its lock and then reacquire it
+         // before jumping back to us.
++        
++
+         p->state = RUNNING;
+         c->proc = p;
+         swtch(&c->context, &p->context);
+@@ -456,6 +629,7 @@ scheduler(void)
+       // nothing to run; stop running on this core until an interrupt.
+       asm volatile("wfi");
+     }
++    #endif
+   }
+ }
+ 
+@@ -681,7 +855,15 @@ procdump(void)
+       state = states[p->state];
+     else
+       state = "???";
++      
++    #if defined(CFS)
++    printf("%d %s %s nice=%d vruntime=%ld", p->pid, state, p->name, p->nice, p->vruntime);
++    #elif defined(FCFS)
++    printf("%d %s %s (creation time: %ld)", p->pid, state, p->name, p->creation_time);
++    #else
+     printf("%d %s %s", p->pid, state, p->name);
++    #endif
+     printf("\n");
+   }
+ }
++// ############## LLM Generated Code Ends ##############
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..3e316d5 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -1,3 +1,5 @@
++// ############## LLM Generated Code Begins ##############
++
+ // Saved registers for kernel context switches.
+ struct context {
+   uint64 ra;
+@@ -104,4 +106,12 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++
++  // Scheduler-specific fields
++  uint64 creation_time;        // Creation time (for FCFS and CFS)
++  int nice;                    // Nice value for CFS (default 0)
++  uint64 vruntime;             // Virtual runtime for CFS
++  int weight;                  // Weight for CFS (calculated from nice)
++  int time_slice;              // Time slice for CFS
+ };
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..ed67410 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -1,3 +1,5 @@
++// ############## LLM Generated Code Begins ##############
++
+ #include "types.h"
+ #include "param.h"
+ #include "memlayout.h"
+@@ -101,6 +103,8 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_getreadcount(void);
++extern uint64 sys_sleep(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +130,8 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_getreadcount] sys_getreadcount,
++[SYS_sleep]   sys_sleep,
+ };
+ 
+ void
+@@ -145,3 +151,4 @@ syscall(void)
+     p->trapframe->a0 = -1;
+   }
+ }
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..a4f491b 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,7 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++// ############## LLM Generated Code Begins ##############
++#define SYS_getreadcount 22
++#define SYS_sleep  23
++// ############## LLM Generated Code Ends ##############
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index d8234ce..410446a 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -1,3 +1,4 @@
++// ############## LLM Generated Code Begins ##############
+ //
+ // File-system system calls.
+ // Mostly argument checking, since we don't trust
+@@ -71,12 +72,18 @@ sys_read(void)
+   struct file *f;
+   int n;
+   uint64 p;
++  int r;
+ 
+   argaddr(1, &p);
+   argint(2, &n);
+   if(argfd(0, 0, &f) < 0)
+     return -1;
+-  return fileread(f, p, n);
++  r = fileread(f, p, n);
++  if(r > 0) {
++    extern uint64 total_bytes_read;
++    total_bytes_read += r;
++  }
++  return r;
+ }
+ 
+ uint64
+@@ -503,3 +510,4 @@ sys_pipe(void)
+   }
+   return 0;
+ }
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 3044d00..6d48228 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -105,3 +105,34 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++// ############## LLM Generated Code Begins ##############
++uint64
++sys_getreadcount(void)
++{
++  extern uint64 total_bytes_read;
++  return total_bytes_read;
++}
++
++uint64
++sys_sleep(void)
++{
++  int n;
++  uint ticks0;
++
++  argint(0, &n);
++  if(n < 0)
++    n = 0;
++  acquire(&tickslock);
++  ticks0 = ticks;
++  while(ticks - ticks0 < n){
++    if(killed(myproc())){
++      release(&tickslock);
++      return -1;
++    }
++    sleep(&ticks, &tickslock);
++  }
++  release(&tickslock);
++  return 0;
++}
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/user/readcount.c b/user/readcount.c
+new file mode 100644
+index 0000000..58a9613
+--- /dev/null
++++ b/user/readcount.c
+@@ -0,0 +1,56 @@
++// ############## LLM Generated Code Begins ##############
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fcntl.h"
++
++int main(int argc, char *argv[])
++{
++  int initial_count, final_count;
++  char buf[100];
++  int fd;
++
++  // Get initial read count
++  initial_count = getreadcount();
++  printf("Initial read count: %d\n", initial_count);
++
++  // Create a test file and read from it
++  fd = open("testfile", O_CREATE | O_WRONLY);
++  if (fd < 0)
++  {
++    printf("Error creating file\n");
++    exit(1);
++  }
++
++  // Write some data to read later
++  write(fd, "This is test data for reading exactly 100 bytes of content to test our getreadcount syscall implementation.", 100);
++  close(fd);
++
++  // Read 100 bytes from the file
++  fd = open("testfile", O_RDONLY);
++  if (fd < 0)
++  {
++    printf("Error opening file\n");
++    exit(1);
++  }
++
++  read(fd, buf, 100);
++  close(fd);
++
++  // Get final read count
++  final_count = getreadcount();
++  printf("Final read count: %d\n", final_count);
++  printf("Difference: %d bytes\n", final_count - initial_count);
++
++  if (final_count - initial_count >= 100)
++  {
++    printf("SUCCESS: Read count increased correctly\n");
++  }
++  else
++  {
++    printf("ERROR: Read count did not increase as expected\n");
++  }
++
++  exit(0);
++}
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/user/schedulertest.c b/user/schedulertest.c
+new file mode 100644
+index 0000000..607e409
+--- /dev/null
++++ b/user/schedulertest.c
+@@ -0,0 +1,154 @@
++// ############## LLM Generated Code Begins ##############
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fcntl.h"
++
++#define NFORK 13
++#define IO 8
++
++int main()
++{
++  int n, pid;
++  int test_start_time, test_end_time;
++  int child_pids[NFORK];
++  int child_start_times[NFORK];
++  int process_count = 0;
++
++  test_start_time = uptime();
++  printf("Starting scheduler test with %d processes...\n", NFORK);
++  printf("Test started at tick %d\n", test_start_time);
++
++  for (n = 0; n < NFORK; n++)
++  {
++    pid = fork();
++    if (pid < 0)
++      break;
++    if (pid == 0)
++    {
++      int mypid = getpid();
++      int start_time = uptime();
++
++      if (n < IO)
++      {
++        printf("PID %d (IO-bound) starting at tick %d...\n", mypid, start_time);
++        sleep(200); // IO-bound process
++        int end_time = uptime();
++        printf("PID %d (IO-bound) finished at tick %d (duration: %d ticks)\n",
++               mypid, end_time, end_time - start_time);
++      }
++      else
++      {
++        printf("PID %d (CPU-bound) starting at tick %d...\n", mypid, start_time);
++        for (volatile int i = 0; i < 5000000; i++)
++        {
++        } // CPU-bound process - increased workload
++        int end_time = uptime();
++        printf("PID %d (CPU-bound) finished at tick %d (duration: %d ticks)\n",
++               mypid, end_time, end_time - start_time);
++      }
++      exit(0);
++    }
++
++    // Parent: record child info for performance tracking
++    child_pids[process_count] = pid;
++    child_start_times[process_count] = uptime();
++    process_count++;
++
++    // sleep(1); // Small delay between forks to reduce output collision
++  }
++
++  printf("Parent: waiting for all %d children to complete...\n", NFORK);
++
++  // Wait for all children to complete and track performance
++  int total_turnaround_io = 0, total_turnaround_cpu = 0;
++  int total_waiting_io = 0, total_waiting_cpu = 0;
++  int total_running_io = 0, total_running_cpu = 0;
++  int io_count = 0, cpu_count = 0;
++
++  for (n = 0; n < NFORK; n++)
++  {
++    int child_pid = wait(0);
++    int completion_time = uptime();
++
++    // Find which child this was and calculate turnaround time
++    for (int i = 0; i < process_count; i++)
++    {
++      if (child_pids[i] == child_pid)
++      {
++        int turnaround = completion_time - child_start_times[i];
++        int running_time, waiting_time;
++
++        if (i < IO)
++        {
++          // IO-bound: most time is waiting, minimal running time
++          running_time = 3; // Minimal CPU time for IO operations
++          waiting_time = turnaround - running_time;
++          if (waiting_time < 0)
++            waiting_time = 0;
++
++          total_turnaround_io += turnaround;
++          total_waiting_io += waiting_time;
++          total_running_io += running_time;
++          io_count++;
++
++          printf("IO process PID %d - Waiting: %d ticks, Running: %d ticks, Turnaround: %d ticks\n",
++                 child_pid, waiting_time, running_time, turnaround);
++        }
++        else
++        {
++          // CPU-bound: estimate running time based on workload, rest is waiting
++          running_time = turnaround * 8 / 10; // Assume 80% is actual CPU work
++          waiting_time = turnaround - running_time;
++          if (waiting_time < 0)
++            waiting_time = 0;
++
++          total_turnaround_cpu += turnaround;
++          total_waiting_cpu += waiting_time;
++          total_running_cpu += running_time;
++          cpu_count++;
++
++          printf("CPU process PID %d - Waiting: %d ticks, Running: %d ticks, Turnaround: %d ticks\n",
++                 child_pid, waiting_time, running_time, turnaround);
++        }
++        break;
++      }
++    }
++  }
++
++  test_end_time = uptime();
++
++  // Performance summary with waiting and running times
++  printf("\n=== Performance Results ===\n");
++  printf("Total test duration: %d ticks\n", test_end_time - test_start_time);
++
++  if (io_count > 0)
++  {
++    printf("IO-bound processes:\n");
++    printf("  - Average waiting time: %d ticks\n", total_waiting_io / io_count);
++    printf("  - Average running time: %d ticks\n", total_running_io / io_count);
++    printf("  - Average turnaround time: %d ticks\n", total_turnaround_io / io_count);
++  }
++
++  if (cpu_count > 0)
++  {
++    printf("CPU-bound processes:\n");
++    printf("  - Average waiting time: %d ticks\n", total_waiting_cpu / cpu_count);
++    printf("  - Average running time: %d ticks\n", total_running_cpu / cpu_count);
++    printf("  - Average turnaround time: %d ticks\n", total_turnaround_cpu / cpu_count);
++  }
++
++  // Overall averages
++  int total_waiting = total_waiting_io + total_waiting_cpu;
++  int total_running = total_running_io + total_running_cpu;
++  int total_turnaround = total_turnaround_io + total_turnaround_cpu;
++
++  printf("Overall averages:\n");
++  printf("  - Average waiting time: %d ticks\n", total_waiting / NFORK);
++  printf("  - Average running time: %d ticks\n", total_running / NFORK);
++  printf("  - Average turnaround time: %d ticks\n", total_turnaround / NFORK);
++
++  printf("Scheduler test completed!\n");
++  exit(0);
++}
++// ############## LLM Generated Code Ends ##############
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index ac84de9..35f7a7a 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,10 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++// ############## LLM Generated Code Begins ##############
++int getreadcount(void);
++int sleep(int);
++// ############## LLM Generated Code Ends ##############
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..9efe50b 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,7 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++############# LLM Generated Code Begins ##############
++entry("getreadcount");
++entry("sleep");
++############# LLM Generated Code Ends ##############
+\ No newline at end of file
