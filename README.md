@@ -25,11 +25,12 @@ Exposes a cumulative counter of every byte fetched via `read()` since boot. Usef
 
 ```
 .
-+-- readcount.c                  # Demo for getreadcount() syscall
-+-- schedulertest.c              # Comparison harness (IO + CPU processes)
-+-- xv6_modifications.patch      # Consolidated patch against stock xv6
-+-- report.md                    # Benchmark analysis and methodology
-+-- README.md                    # This document
+├── kernel/                    # Scheduler and syscall implementation
+├── user/readcount.c           # Demo for getreadcount()
+├── user/schedulertest.c       # Comparison harness (I/O and CPU processes)
+├── xv6_modifications.patch    # Consolidated patch against stock xv6
+├── report.md                  # Benchmark analysis and methodology
+└── README.md                  # This document
 ```
 
 ## Build Instructions
